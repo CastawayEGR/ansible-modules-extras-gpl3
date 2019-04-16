@@ -2,7 +2,7 @@
 #
 # (c) 2015, Joseph Callen <jcallen () csc.com>
 # Portions Copyright (c) 2015 VMware, Inc. All rights reserved.
-#
+# Updated on 4/16/19 by Michael Tipton <mike () ibeta.org>
 # This file is part of Ansible
 #
 # Ansible is free software: you can redistribute it and/or modify
@@ -17,6 +17,14 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
+from __future__ import absolute_import, division, print_function
+
+__metaclass__ = type
+
+ANSIBLE_METADATA = {'metadata_version': '1.1',
+                    'status': ['preview'],
+                    'supported_by': 'community'}
 
 DOCUMENTATION = '''
 module: vcenter_pg_activeuplinks
@@ -62,31 +70,29 @@ EXAMPLES = '''
 '''
 
 
-try:
-    from pyVmomi import vim, vmodl
-    HAS_PYVMOMI = True
-except ImportError:
-    HAS_PYVMOMI = False
-
-
 vc = {}
 
-invalid_uplinks_fail_msg = ("Specified uplinks: {} "
-                            "include a LAG group and Uplink or mulitple LAG groups. "
-                            "Only Single LAG or multiple Uplinks allowed.")
-
+results = dict(changed=False, msg=dict())
 
 def state_destroy_pguplink(module):
-    module.exit_json(msg="DESTROY")
-
+    results['changed'] = True
 
 def state_exit_unchanged(module):
-    module.exit_json(msg="EXIT UNCHANGED")
-
+    results['changed'] = False
 
 def state_update_pguplinks(module):
-    module.exit_json(msg="UPDATE")
+    results['changed'] = True
 
+try:
+    from pyVmomi import vim, vmodl
+except ImportError:
+    pass
+
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils._text import to_native
+from ansible.module_utils.vmware import (connect_to_api, vmware_argument_spec, 
+                                         find_dvs_by_name, find_dvspg_by_name,
+                                         TaskError, wait_for_task)
 
 def get_current_active_uplinks():
 
@@ -112,6 +118,8 @@ def uplink_spec(module, uplinks, pg_config_version):
     if module.params['uplink_state'] == 'standby':
 
         active_uplinks = get_current_active_uplinks()
+        if not uplinks:
+            uplinks = module.params['uplinks']
 
         spec.defaultPortConfig.uplinkTeamingPolicy.uplinkPortOrder = \
             vim.dvs.VmwareDistributedVirtualSwitch.UplinkPortOrderPolicy()
@@ -133,17 +141,10 @@ def create_active_uplink(module, pg):
     try:
         reconfig_task = pg.ReconfigureDVPortgroup_Task(pg_spec)
         changed, result = wait_for_task(reconfig_task)
-    except vim.fault.DvsFault, dvs_fault:
-        module.fail_json(msg="Invalid spec: {}".format(str(dvs_fault)))
-    except vim.fault.ConcurrentAccess, access:
-        module.fail_json(msg="Concurrent Access Fault: {}".format(str(access)))
-    except vmodl.fault.NotSupported, support:
-        module.fail_json(msg="Feature in spec not supported: {}".format(str(support)))
-    except Exception, e:
-        module.fail_json(msg="Failed to reconfigure: {}".format(str(e)))
+    except TaskError as invalid_argument:
+        module.fail_json(msg="Failed to update uplink portgroup : %s" % to_native(invalid_argument))
 
     return changed, result
-
 
 def state_create_pguplinks(module):
 
@@ -156,10 +157,9 @@ def state_create_pguplinks(module):
 
     module.exit_json(changed=changed, result=result, msg="STATE CREATE")
 
-
 def check_vds_for_lags(vds):
 
-    lags = None
+    lags = []
 
     if vds.config.lacpApiVersion != "multipleLag":
         return lags
@@ -186,7 +186,6 @@ def check_uplinks_lag_uplink(module, vds_lags):
 
     return state
 
-
 def check_uplinks_valid(module):
 
     uplinks = module.params['uplinks']
@@ -205,7 +204,6 @@ def check_uplinks_valid(module):
 
     return state
 
-
 def check_uplinks_present(module):
 
     state = False
@@ -222,7 +220,6 @@ def check_uplinks_present(module):
         state = True
 
     return state
-
 
 def check_pguplink_state(module):
 
@@ -259,8 +256,6 @@ def check_pguplink_state(module):
 
     return state
 
-
-
 def main():
     argument_spec = vmware_argument_spec()
 
@@ -276,9 +271,6 @@ def main():
 
     module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=False)
 
-    if not HAS_PYVMOMI:
-        module.fail_json(msg='pyvmomi is required for this module')
-
     pguplink_states = {
         'absent': {
             'present': state_destroy_pguplink,
@@ -293,11 +285,8 @@ def main():
 
     desired_state = module.params['state']
     current_state = check_pguplink_state(module)
-
     pguplink_states[desired_state][current_state](module)
-
-from ansible.module_utils.basic import *
-from ansible.module_utils.vmware import *
+    module.exit_json(**results)
 
 if __name__ == '__main__':
     main()
